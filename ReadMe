@@ -1,0 +1,142 @@
+Employee Sentiment Analysis
+
+This project performs automated sentiment analysis on employee emails/messages and generates insights such as sentiment trends, monthly scores, employee rankings, flight risk identification, and predictive modeling.
+
+Project Overview
+
+The main objectives of the project are:
+
+Sentiment Labeling – Automatically classify each message as Positive, Negative, or Neutral using a pretrained transformer model.
+
+Exploratory Data Analysis (EDA) – Analyze message patterns and visualize trends over time.
+
+Employee Score Calculation – Compute monthly sentiment scores for each employee.
+
+Employee Ranking – Identify top positive and negative employees per month.
+
+Flight Risk Identification – Flag employees at risk of leaving based on negative message frequency.
+
+Predictive Modeling – Use linear regression to model sentiment trends and predict employee monthly sentiment scores.
+
+Requirements
+
+Python 3.9+
+
+Libraries:
+
+pip install pandas numpy matplotlib seaborn transformers scikit-learn openpyxl tqdm
+
+
+Input dataset: CSV or Excel file with columns:
+
+Subject, body, date, from
+
+How to Run
+
+Set the input file path and output folder in the script:
+
+input_path = '/content/drive/MyDrive/test.xlsx'  # or .csv
+output_folder = '/content/drive/MyDrive/sentiment_project_outputs'
+
+
+Run the script. It will automatically:
+
+Label sentiment of messages
+
+Perform EDA and save charts
+
+Compute monthly employee sentiment scores
+
+Rank employees
+
+Identify flight risk employees
+
+Train and evaluate a linear regression model
+
+Save all outputs to the output_folder
+
+Outputs
+
+All outputs are saved to the output_folder. Key files include:
+
+Labeled Dataset
+
+test_labeled.csv / test_labeled.xlsx – Original dataset augmented with sentiment labels and numeric scores.
+
+EDA Outputs
+
+sentiment_distribution.png – Bar chart of overall sentiment distribution.
+
+monthly_sentiment_trends.png – Stacked bar chart of monthly sentiment counts.
+
+monthly_sentiment_counts.csv – CSV summary of monthly sentiment counts.
+
+Separate monthly sentiment charts:
+
+positive_trend.png
+
+negative_trend.png
+
+neutral_trend.png
+
+Employee Scores & Rankings
+
+employee_monthly_scores.csv – Monthly sentiment scores per employee.
+
+top_3_positive_per_month.csv – Top 3 positive employees per month.
+
+top_3_negative_per_month.csv – Top 3 negative employees per month.
+
+Flight Risk
+
+flight_risk_employees.csv – Employees identified as flight risk based on rolling 30-day negative email count.
+
+Predictive Modeling (Linear Regression)
+
+regression_predictions.csv – Actual vs predicted monthly sentiment scores.
+
+regression_coefficients.csv – Coefficients of features in the linear regression model.
+
+Features Used for Predictive Modeling
+
+For each employee per month:
+
+msg_count – Total messages sent
+
+avg_message_length – Average message length (characters)
+
+avg_word_count – Average word count per message
+
+pct_negative – Proportion of messages classified as negative
+
+pct_positive – Proportion of messages classified as positive
+
+Target: monthly_score (sum of message scores)
+
+Notes
+
+Sentiment labeling uses DistilBERT fine-tuned on SST-2.
+
+Messages with unparseable dates or missing body/from are excluded.
+
+Flight risk considers a rolling 30-day window, not just calendar months.
+
+Monthly sentiment trends are visualized in separate charts for Positive, Negative, and Neutral messages.
+
+Folder Structure Example
+sentiment_project_outputs/
+│
+├── test_labeled.csv
+├── test_labeled.xlsx
+├── sentiment_distribution.png
+├── monthly_sentiment_trends.png
+├── monthly_sentiment_counts.csv
+├── positive_trend.png
+├── negative_trend.png
+├── neutral_trend.png
+├── employee_monthly_scores.csv
+├── top_3_positive_per_month.csv
+├── top_3_negative_per_month.csv
+├── flight_risk_employees.csv
+├── regression_predictions.csv
+└── regression_coefficients.csv

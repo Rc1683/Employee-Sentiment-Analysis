@@ -1,0 +1,336 @@
+# Employee Sentiment Analysis
+# Assumes input file path in `input_path` (csv or xlsx)
+# Uses columns exactly: Subject, body, date, from.
+# Install dependencies
+# !pip install transformers openpyxl
+
+import os
+import pandas as pd
+import numpy as np
+from datetime import timedelta
+import matplotlib.pyplot as plt
+from transformers import pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+
+# -------- USER CONFIG --------
+input_path = '/content/drive/MyDrive/test.xlsx'  # change to your path, supports .csv or .xlsx
+output_folder = '/content/drive/MyDrive/sentiment_project_outputs'  # change if desired
+os.makedirs(output_folder, exist_ok=True)
+
+# -------- Load file (CSV or Excel) and clean headers (strip only) --------
+ext = os.path.splitext(input_path)[1].lower()
+if ext in ['.xls', '.xlsx']:
+    df = pd.read_excel(input_path)
+elif ext == '.csv':
+    df = pd.read_csv(input_path)
+else:
+    raise ValueError("Unsupported file extension. Provide .csv or .xlsx")
+
+# Strip whitespace from column names (do NOT rename)
+df.columns = df.columns.str.strip()
+
+print("Columns after cleaning:", df.columns.tolist())
+
+# Ensure required columns exist
+required = {'Subject', 'body', 'date', 'from'}
+missing = required - set(df.columns)
+if missing:
+    raise ValueError(f"Missing required columns: {missing}. Your columns: {df.columns.tolist()}")
+
+# Parse date column robustly
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+n_missing_dates = df['date'].isna().sum()
+print(f"Total records: {len(df)}. Rows with unparseable dates: {n_missing_dates}")
+
+# Drop rows without 'body' or without 'from' or without date because they are not usable for analysis
+df = df.dropna(subset=['body', 'from', 'date']).reset_index(drop=True)
+print("Records after dropping rows missing body/from/date:", len(df))
+
+# -------- Task 1: Sentiment Labeling --------
+# Approach documented:
+# - We use a pretrained transformer sentiment pipeline (distilbert finetuned on SST-2).
+# - For each message (body), we run the pipeline and map: POSITIVE -> Positive if confidence > 0.6, NEGATIVE -> Negative if >0.6, else Neutral
+# - We limit input length to first 512 tokens/chars for performance and stability.
+
+print("\nInitializing sentiment pipeline (this may take some time on first run)...")
+sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+
+def label_sentiment_text(text, threshold=0.6):
+    # guard
+    if not isinstance(text, str) or text.strip() == "":
+        return "Neutral"
+    try:
+        # limit text length to avoid very long inputs
+        res = sentiment_analyzer(text[:2000])[0]  # keep up to 2000 chars for safety
+        lab = res['label'].upper()
+        score = float(res.get('score', 0.0))
+        if lab == 'POSITIVE' and score >= threshold:
+            return "Positive"
+        elif lab == 'NEGATIVE' and score >= threshold:
+            return "Negative"
+        else:
+            return "Neutral"
+    except Exception as e:
+        # in case of any pipeline error, mark neutral to avoid crash
+        return "Neutral"
+
+# Apply sentiment labeling (use tqdm if available for progress)
+try:
+    from tqdm import tqdm
+    tqdm.pandas()
+    df['sentiment'] = df['body'].progress_apply(label_sentiment_text)
+except Exception:
+    df['sentiment'] = df['body'].apply(label_sentiment_text)
+
+# Map to numeric score for later aggregation
+score_map = {"Positive": 1, "Negative": -1, "Neutral": 0}
+df['score'] = df['sentiment'].map(score_map)
+
+print("Sentiment label counts:\n", df['sentiment'].value_counts())
+
+# Save intermediate labeled dataset
+labeled_path_csv = os.path.join(output_folder, 'test_labeled.csv')
+labeled_path_xlsx = os.path.join(output_folder, 'test_labeled.xlsx')
+df.to_csv(labeled_path_csv, index=False)
+df.to_excel(labeled_path_xlsx, index=False)
+print(f"Labeled dataset saved to:\n {labeled_path_csv}\n {labeled_path_xlsx}")
+
+# -------- Task 2: Exploratory Data Analysis (EDA) --------
+# Basic EDA printed and basic plots saved to output folder
+
+print("\n--- EDA Summary ---")
+print("Data types:\n", df.dtypes)
+print("\nMissing values per column:\n", df.isnull().sum())
+print("\nRecords by 'from' (top 10):\n", df['from'].value_counts().head(10))
+
+# Sentiment distribution
+sent_counts = df['sentiment'].value_counts()
+print("\nSentiment distribution:\n", sent_counts)
+
+# Plot 1: sentiment distribution bar chart
+plt.figure(figsize=(6,4))
+sent_counts.plot(kind='bar', title='Sentiment Distribution')
+plt.ylabel('Count')
+plt.tight_layout()
+plt.savefig(os.path.join(output_folder, 'sentiment_distribution.png'))
+plt.close()
+
+# Messages over time - monthly
+df['month'] = df['date'].dt.to_period('M')  # period for month grouping
+monthly_sent = df.groupby(['month','sentiment']).size().unstack(fill_value=0)
+monthly_sent.plot(kind='bar', stacked=True, figsize=(12,6), title='Monthly Sentiment Counts')
+plt.ylabel('Number of messages')
+plt.tight_layout()
+plt.savefig(os.path.join(output_folder, 'monthly_sentiment_trends.png'))
+plt.close()
+
+# Save a small EDA summary CSV
+monthly_sent.reset_index().to_csv(os.path.join(output_folder, 'monthly_sentiment_counts.csv'), index=False)
+print("EDA plots and summary saved to output folder.")
+
+# -------- Task 3: Employee Score Calculation (monthly) --------
+# For each employee ('from') and month, sum scores.
+monthly_scores = df.groupby([df['from'], df['month']])['score'].sum().reset_index()
+monthly_scores.rename(columns={'from': 'employee', 'score': 'monthly_score'}, inplace=True)
+# Ensure 'month' is string for easy saving/sorting
+monthly_scores['month'] = monthly_scores['month'].astype(str)
+
+# Save monthly scores
+monthly_scores.to_csv(os.path.join(output_folder, 'employee_monthly_scores.csv'), index=False)
+print("\nMonthly sentiment scores computed and saved.")
+
+# -------- Task 4: Employee Ranking --------
+# For each month find:
+# - Top Three Positive Employees: highest monthly_score (desc) then alphabetical of employee (asc)
+# - Top Three Negative Employees: lowest monthly_score (asc) then alphabetical
+
+def get_top_lists(df_monthly_scores, top_n=3):
+    all_months = sorted(df_monthly_scores['month'].unique())
+    top_pos_list = []
+    top_neg_list = []
+    for m in all_months:
+        sub = df_monthly_scores[df_monthly_scores['month'] == m].copy()
+        # Sort for positive: monthly_score desc, employee asc (alphabetical)
+        sub_pos = sub.sort_values(by=['monthly_score', 'employee'], ascending=[False, True])
+        top_pos = sub_pos.head(top_n).copy()
+        top_pos['rank_month'] = m
+        top_pos_list.append(top_pos)
+
+        # Sort for negative: monthly_score asc (most negative), employee asc
+        sub_neg = sub.sort_values(by=['monthly_score', 'employee'], ascending=[True, True])
+        top_neg = sub_neg.head(top_n).copy()
+        top_neg['rank_month'] = m
+        top_neg_list.append(top_neg)
+
+    top_pos_df = pd.concat(top_pos_list, ignore_index=True) if top_pos_list else pd.DataFrame()
+    top_neg_df = pd.concat(top_neg_list, ignore_index=True) if top_neg_list else pd.DataFrame()
+    return top_pos_df, top_neg_df
+
+top_pos_df, top_neg_df = get_top_lists(monthly_scores, top_n=3)
+
+# Save ranking outputs
+top_pos_df.to_csv(os.path.join(output_folder, 'top_3_positive_per_month.csv'), index=False)
+top_neg_df.to_csv(os.path.join(output_folder, 'top_3_negative_per_month.csv'), index=False)
+
+print("\nTop 3 positive (per month) sample:\n", top_pos_df.head(10))
+print("\nTop 3 negative (per month) sample:\n", top_neg_df.head(10))
+print("Rankings saved to output folder.")
+
+# -------- Task 5: Flight Risk Identification (rolling 30-day rule) --------
+# Definition: Flight risk if an employee has sent 4 or more negative mails in any rolling 30-day window.
+# Implementation: For each employee, sort by date, compute rolling sum of negative flags over the last 30 days using .rolling('30D') on DatetimeIndex.
+
+flight_risk_employees = set()
+flight_risk_records = []  # store details when threshold crossed
+
+for emp, group in df.groupby('from'):
+    grp = group.sort_values('date').set_index('date')
+    # negative flag as int
+    neg_flag = grp['sentiment'].eq('Negative').astype(int)
+    # rolling sum over 30 days
+    roll_neg = neg_flag.rolling('30D').sum()
+    # find any windows where roll_neg >= 4
+    if (roll_neg >= 4).any():
+        flight_risk_employees.add(emp)
+        # capture first timestamp when condition met
+        first_date = roll_neg[roll_neg >= 4].index.min()
+        flight_risk_records.append({'employee': emp, 'first_detection_date': first_date, 'neg_count_30d': int(roll_neg.max())})
+
+flight_risk_df = pd.DataFrame(flight_risk_records)
+flight_risk_df.to_csv(os.path.join(output_folder, 'flight_risk_employees.csv'), index=False)
+print(f"\nFlight risk employees detected: {len(flight_risk_employees)}")
+if len(flight_risk_employees) > 0:
+    print(flight_risk_df.head())
+
+# -------- Task 6: Predictive Modeling (Linear Regression) --------
+# Features: per employee-month
+# - msg_count: number of messages in that month
+# - avg_message_length: mean characters per message
+# - avg_word_count: mean words per message
+# - pct_negative: proportion of messages that month that are negative
+# Target: monthly_score (sum of message scores in that employee-month)
+
+# Build features from the original df (grouped by employee+month)
+df['message_length'] = df['body'].str.len()
+df['word_count'] = df['body'].str.split().str.len()
+grouped = df.groupby([df['from'], df['month']]).agg(
+    msg_count=('body', 'count'),
+    avg_message_length=('message_length', 'mean'),
+    avg_word_count=('word_count', 'mean'),
+    negative_count=('sentiment', lambda s: (s == 'Negative').sum()),
+    positive_count=('sentiment', lambda s: (s == 'Positive').sum()),
+    monthly_score=('score', 'sum')
+).reset_index()
+
+# percent negative
+grouped['pct_negative'] = grouped['negative_count'] / grouped['msg_count']
+grouped['pct_positive'] = grouped['positive_count'] / grouped['msg_count']
+
+# Drop rows with NaN or inf
+grouped = grouped.replace([np.inf, -np.inf], np.nan).dropna(subset=['avg_message_length', 'avg_word_count', 'msg_count', 'monthly_score'])
+
+# Features and target
+feature_cols = ['msg_count', 'avg_message_length', 'avg_word_count', 'pct_negative', 'pct_positive']
+X = grouped[feature_cols]
+y = grouped['monthly_score']
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Fit Linear Regression
+lr = LinearRegression()
+lr.fit(X_train, y_train)
+
+# Predictions & evaluation
+y_pred = lr.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+print("\nLinear Regression results:")
+print(f"  Features: {feature_cols}")
+print(f"  Test MSE: {mse:.4f}")
+print(f"  Test R2: {r2:.4f}")
+coef_df = pd.DataFrame({'feature': feature_cols, 'coefficient': lr.coef_})
+print("\nModel coefficients:\n", coef_df)
+
+# Save model summary & predictions
+pred_df = X_test.copy()
+pred_df['actual_monthly_score'] = y_test.values
+pred_df['predicted_monthly_score'] = y_pred
+pred_df.to_csv(os.path.join(output_folder, 'regression_predictions.csv'), index=False)
+coef_df.to_csv(os.path.join(output_folder, 'regression_coefficients.csv'), index=False)
+
+# -------- Final outputs saved --------
+print(f"\nAll outputs saved to: {output_folder}")
+print("Files saved include: labeled dataset (csv/xlsx), monthly scores, rankings, flight risk list, EDA charts, regression outputs.")
+
+# Optional: show small samples for quick visual check
+print("\nSample labeled rows:")
+print(df[['from','date','Subject','body','sentiment','score']].head(5))
+
+print("\nSample employee-month features (for model):")
+print(grouped[feature_cols + ['monthly_score']].head(5))
+
+# End of script
+
+
+For visualization
+
+
+# Ensure output folder exists for charts
+os.makedirs(output_folder, exist_ok=True)
+
+# Monthly counts per sentiment
+monthly_sent = df.groupby(['month', 'sentiment']).size().unstack(fill_value=0)
+
+
+# 1. Positive Messages Trend
+
+if 'Positive' in monthly_sent.columns:
+    plt.figure(figsize=(10,5))
+    monthly_sent['Positive'].plot(kind='bar', color='green')
+    plt.title("Monthly Positive Messages Trend")
+    plt.xlabel("Month")
+    plt.ylabel("Number of Positive Messages")
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, 'positive_trend.png'))
+    plt.close()
+
+# 2. Negative Messages Trend
+
+if 'Negative' in monthly_sent.columns:
+    plt.figure(figsize=(10,5))
+    monthly_sent['Negative'].plot(kind='bar', color='red')
+    plt.title("Monthly Negative Messages Trend")
+    plt.xlabel("Month")
+    plt.ylabel("Number of Negative Messages")
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, 'negative_trend.png'))
+    plt.close()
+
+# 3. Neutral Messages Trend
+
+if 'Neutral' in monthly_sent.columns:
+    plt.figure(figsize=(10,5))
+    monthly_sent['Neutral'].plot(kind='bar', color='blue')
+    plt.title("Monthly Neutral Messages Trend")
+    plt.xlabel("Month")
+    plt.ylabel("Number of Neutral Messages")
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, 'neutral_trend.png'))
+    plt.close()
+
+print(" Separate sentiment trend charts saved for Positive, Negative, and Neutral messages.")
+
+
+
+
+
